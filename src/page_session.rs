@@ -3,7 +3,7 @@ use eframe::egui::{
     TextStyle, Ui, Widget,
 };
 use egui_dnd::dnd;
-use egui_file::{DialogType, FileDialog};
+use crate::file_dialog_helper::NativeFileDialog;
 use egui_json_tree::JsonTree;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -277,7 +277,7 @@ pub struct PageSession {
     config_file_id_count: u64,
     config_files: BTreeMap<u64, ConfigFileData>,
     dnd_items: Vec<DndItem>,
-    file_dialog: Option<FileDialog>,
+    file_dialog: Option<NativeFileDialog>,
 }
 
 impl Default for PageSession {
@@ -337,29 +337,19 @@ impl PageSession {
             }
         });
 
-        let mut open_file_path: Option<PathBuf> = None;
-        if let Some(dialog) = &mut self.file_dialog {
-            if dialog.show(ctx).selected() {
-                match dialog.dialog_type() {
-                    DialogType::SelectFolder | DialogType::SaveFile => {
-                        return;
-                    }
-                    DialogType::OpenFile => {
-                        if let Some(p) = dialog.path() {
-                            if let Ok(o) = p.canonicalize() {
-                                open_file_path = Some(o);
-                            }
-                        }
+        if let Some(dialog) = &self.file_dialog {
+            if let Some(result) = dialog.try_recv() {
+                if let Some(p) = result {
+                    if let Ok(o) = p.canonicalize() {
+                        let name = match o.file_stem() {
+                            None => "new file".to_string(),
+                            Some(s) => s.to_string_lossy().to_string(),
+                        };
+                        self.add_config_file(ConfigFileData::new(name, o));
                     }
                 }
+                self.file_dialog = None;
             }
-        }
-        if let Some(p) = open_file_path {
-            let name = match p.file_stem() {
-                None => "new file".to_string(),
-                Some(o) => o.to_string_lossy().to_string(),
-            };
-            self.add_config_file(ConfigFileData::new(name, p));
         }
     }
 
@@ -435,11 +425,7 @@ impl PageSession {
                 .on_hover_text("Add a zenoh session configuration")
                 .clicked()
             {
-                let mut dialog = FileDialog::open_file(None)
-                    .show_new_folder(false)
-                    .show_rename(false);
-                dialog.open();
-                self.file_dialog = Some(dialog);
+                self.file_dialog = Some(NativeFileDialog::open(None));
             }
 
             if ui.button(RichText::new(" - ").code()).clicked() {

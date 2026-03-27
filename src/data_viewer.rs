@@ -9,6 +9,25 @@ use zenoh::bytes::Encoding;
 
 use crate::zenoh_data::KnownEncoding;
 
+/// Decode image bytes into a ColorImage. This is CPU-intensive and should be
+/// called from a background thread when used in a streaming context.
+pub fn decode_image(known_encoding: KnownEncoding, data: &[u8]) -> Result<ColorImage, String> {
+    let format = match known_encoding {
+        KnownEncoding::ImagePng => ImageFormat::Png,
+        KnownEncoding::ImageJpeg => ImageFormat::Jpeg,
+        KnownEncoding::ImageGif => ImageFormat::Gif,
+        KnownEncoding::ImageBmp => ImageFormat::Bmp,
+        KnownEncoding::ImageWebP => ImageFormat::WebP,
+        _ => return Err("not image".to_string()),
+    };
+    let mut reader = ImageReader::new(Cursor::new(data));
+    reader.set_format(format);
+    let m = reader.decode().map_err(|e| e.to_string())?;
+    let buf = m.into_rgba8();
+    let size = [buf.width() as usize, buf.height() as usize];
+    Ok(ColorImage::from_rgba_unmultiplied(size, buf.as_flat_samples().as_slice()))
+}
+
 #[derive(Eq, PartialEq, Copy, Clone)]
 pub enum ViewerJsonPage {
     Source,
@@ -161,6 +180,18 @@ impl DataViewer {
                 *selected_page = ViewerJsonPage::Tree;
             }
         });
+    }
+
+    /// Update data in-place, preserving UI state (e.g. JSON tab selection).
+    pub fn update(&mut self, encoding: &Encoding, data: &[u8]) {
+        let old_json_page = match self {
+            DataViewer::Json { selected_page, .. } => Some(*selected_page),
+            _ => None,
+        };
+        *self = Self::load(encoding, data);
+        if let (Some(old_page), DataViewer::Json { selected_page, .. }) = (old_json_page, self) {
+            *selected_page = old_page;
+        }
     }
 
     pub fn load(encoding: &Encoding, data: &[u8]) -> DataViewer {

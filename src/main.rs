@@ -1,6 +1,7 @@
 mod app;
 mod archive_file;
 mod data_viewer;
+mod file_dialog_helper;
 mod hex_viewer;
 mod language;
 mod page_get;

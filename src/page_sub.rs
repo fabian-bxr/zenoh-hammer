@@ -16,10 +16,14 @@ use std::{
 use strum::IntoEnumIterator;
 use zenoh::{key_expr::OwnedKeyExpr, sample::Sample};
 
+use eframe::egui::ColorImage;
+use flume::Receiver;
+
 use crate::{
+    data_viewer::{decode_image, DataViewer},
     sample_viewer::SampleViewer,
     task_zenoh::SubData,
-    zenoh_data::{zenoh_value_abstract, ZLocality},
+    zenoh_data::{zenoh_value_abstract, KnownEncoding, ZLocality},
 };
 
 pub const VALUE_BUFFER_SIZE_DEFAULT: usize = 10;
@@ -47,6 +51,12 @@ pub struct PageSub {
     selected_sub_id: u64,
     show_sample_viewer_window: bool,
     sample_viewer_window: SampleViewer,
+    auto_update: bool,
+    auto_update_pending: bool,
+    auto_update_last_time: SystemTime,
+    image_decode_rx: Option<Receiver<Result<ColorImage, String>>>,
+    viewed_sub_id: u64,
+    viewed_key: String,
     sub_data_group: BTreeMap<u64, PageSubData>, // <sub id, group>
     dnd_items: Vec<DndItem>,
 }
@@ -59,6 +69,12 @@ impl Default for PageSub {
             selected_sub_id: 1,
             show_sample_viewer_window: false,
             sample_viewer_window: SampleViewer::default(),
+            auto_update: false,
+            auto_update_pending: false,
+            auto_update_last_time: UNIX_EPOCH,
+            image_decode_rx: None,
+            viewed_sub_id: 0,
+            viewed_key: String::new(),
             sub_data_group: BTreeMap::new(),
             dnd_items: Vec::new(),
         };
@@ -120,6 +136,66 @@ impl PageSub {
             });
         });
 
+        // Poll for completed background image decodes
+        if let Some(rx) = &self.image_decode_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(color_image) => {
+                        self.sample_viewer_window.set_data_viewer(DataViewer::Image {
+                            color_image,
+                            image_texture_handle: None,
+                        });
+                    }
+                    Err(e) => {
+                        self.sample_viewer_window.set_data_viewer(DataViewer::Error(e));
+                    }
+                }
+                self.image_decode_rx = None;
+            }
+        }
+
+        // Throttled auto-update: apply pending update at most once per 100ms
+        if self.auto_update_pending {
+            let now = SystemTime::now();
+            let elapsed = now
+                .duration_since(self.auto_update_last_time)
+                .unwrap_or(Duration::from_secs(1));
+            if elapsed >= Duration::from_millis(100) {
+                if let Some(data_group) = self.sub_data_group.get(&self.viewed_sub_id) {
+                    if let Some(dv) = data_group.map.get(&self.viewed_key) {
+                        if let Some((sample, _)) = dv.deque.back() {
+                            let known = KnownEncoding::from_encoding(sample.encoding());
+                            // Always update metadata (cheap)
+                            self.sample_viewer_window.update_metadata(sample);
+                            match known {
+                                KnownEncoding::ImagePng
+                                | KnownEncoding::ImageJpeg
+                                | KnownEncoding::ImageGif
+                                | KnownEncoding::ImageBmp
+                                | KnownEncoding::ImageWebP => {
+                                    // Offload expensive image decode to background thread
+                                    if self.image_decode_rx.is_none() {
+                                        let payload = sample.payload().to_bytes().to_vec();
+                                        let (tx, rx) = flume::unbounded();
+                                        self.image_decode_rx = Some(rx);
+                                        std::thread::spawn(move || {
+                                            let _ = tx.send(decode_image(known, &payload));
+                                        });
+                                    }
+                                }
+                                _ => {
+                                    // Non-image: update data viewer directly (fast)
+                                    self.sample_viewer_window.update_from_sample(sample);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.auto_update_last_time = now;
+                self.auto_update_pending = false;
+            }
+        }
+
         let window = Window::new("Info")
             .id(Id::new("view sample window"))
             .collapsible(false)
@@ -130,6 +206,17 @@ impl PageSub {
             .min_width(200.0);
 
         window.show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.auto_update, "auto update");
+                if self.auto_update && !self.viewed_key.is_empty() {
+                    ui.label(
+                        RichText::new(format!("key: {}", self.viewed_key))
+                            .monospace()
+                            .size(11.0),
+                    );
+                }
+            });
+            ui.separator();
             self.sample_viewer_window.show(ui);
         });
     }
@@ -416,6 +503,8 @@ impl PageSub {
                                     self.show_sample_viewer_window = true;
                                     self.sample_viewer_window =
                                         SampleViewer::new_from_sample(sample);
+                                    self.viewed_sub_id = self.selected_sub_id;
+                                    self.viewed_key = selected_key.clone();
                                 }
                             });
                             row.col(|ui| {
@@ -472,6 +561,15 @@ impl PageSub {
 
     pub fn processing_sub_cb(&mut self, id: u64, sample: Sample, receipt_time: SystemTime) {
         let key = sample.key_expr().to_string();
+
+        if self.auto_update
+            && self.show_sample_viewer_window
+            && id == self.viewed_sub_id
+            && key == self.viewed_key
+        {
+            self.auto_update_pending = true;
+        }
+
         if let Some(data_group) = self.sub_data_group.get_mut(&id) {
             if let Some(sv) = data_group.map.get_mut(&key) {
                 sv.add_data(sample, receipt_time);

@@ -2,7 +2,7 @@ use eframe::egui::{
     Button, Color32, ColorImage, ComboBox, DragValue, Grid, RichText, TextEdit, TextureHandle,
     TextureOptions, Ui, Widget,
 };
-use egui_file::{DialogType, FileDialog};
+use crate::file_dialog_helper::NativeFileDialog;
 use egui_plot::{Plot, PlotImage, PlotPoint};
 use hex::decode;
 use image::{ImageFormat, ImageReader};
@@ -32,7 +32,7 @@ pub struct PayloadEdit {
     payload_str: String,
     file_path_str: String,
     file_path: Option<PathBuf>,
-    file_dialog: Option<FileDialog>,
+    file_dialog: Option<NativeFileDialog>,
     image_data: Option<ColorImage>,
     image_texture: Option<TextureHandle>,
     file_load_result: Option<Result<String, String>>,
@@ -123,11 +123,12 @@ impl PayloadEdit {
             KnownEncoding::Other(_) => self.show_binary_editor(ui),
         }
 
-        if let Some(dialog) = &mut self.file_dialog {
-            if dialog.show(ui.ctx()).selected() {
-                if let DialogType::OpenFile = dialog.dialog_type() {
-                    self.file_path = dialog.path().map(|p| p.to_path_buf());
+        if let Some(dialog) = &self.file_dialog {
+            if let Some(result) = dialog.try_recv() {
+                if let Some(path) = result {
+                    self.file_path = Some(path);
                 }
+                self.file_dialog = None;
             }
         }
     }
@@ -277,11 +278,7 @@ impl PayloadEdit {
                         DataLoadMode::String => {}
                         DataLoadMode::File => {
                             if ui.button("select text file").clicked() {
-                                let mut dialog = FileDialog::open_file(self.file_path.clone())
-                                    .show_new_folder(false)
-                                    .show_rename(false);
-                                dialog.open();
-                                self.file_dialog = Some(dialog);
+                                self.file_dialog = Some(NativeFileDialog::open(self.file_path.clone()));
                             }
                             if ui.button("load").clicked() {
                                 let _ = self.string_load_file();
@@ -361,11 +358,7 @@ impl PayloadEdit {
                         }
                         DataLoadMode::File => {
                             if ui.button("select binary file").clicked() {
-                                let mut dialog = FileDialog::open_file(self.file_path.clone())
-                                    .show_new_folder(false)
-                                    .show_rename(false);
-                                dialog.open();
-                                self.file_dialog = Some(dialog);
+                                self.file_dialog = Some(NativeFileDialog::open(self.file_path.clone()));
                             }
                             if ui.button("load").clicked() {
                                 let _ = self.binary_load_file();
@@ -438,11 +431,7 @@ impl PayloadEdit {
             Page::Source => {
                 ui.horizontal(|ui| {
                     if ui.button("select image file").clicked() {
-                        let mut dialog = FileDialog::open_file(self.file_path.clone())
-                            .show_new_folder(false)
-                            .show_rename(false);
-                        dialog.open();
-                        self.file_dialog = Some(dialog);
+                        self.file_dialog = Some(NativeFileDialog::open(self.file_path.clone()));
                     }
 
                     if ui.button("load").clicked() {

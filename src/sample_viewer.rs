@@ -51,6 +51,26 @@ impl SampleViewer {
         }
     }
 
+    /// Update data in-place, preserving UI state (selected tab, JSON view, etc.)
+    pub fn update_from_sample(&mut self, sample: &Sample) {
+        self.sample_info = SampleInfo::new_from(sample);
+        let arc_data = Arc::new(sample.payload().to_bytes().to_vec());
+        self.data_viewer.update(sample.encoding(), arc_data.as_slice());
+        self.hex_view = HexViewer::new(arc_data);
+    }
+
+    /// Update only metadata and hex view, leaving data_viewer unchanged.
+    /// Used when the data_viewer will be updated asynchronously (e.g. background image decode).
+    pub fn update_metadata(&mut self, sample: &Sample) {
+        self.sample_info = SampleInfo::new_from(sample);
+        let arc_data = Arc::new(sample.payload().to_bytes().to_vec());
+        self.hex_view = HexViewer::new(arc_data);
+    }
+
+    pub fn set_data_viewer(&mut self, data_viewer: DataViewer) {
+        self.data_viewer = data_viewer;
+    }
+
     #[allow(dead_code)]
     pub fn new(base_info: SampleInfo, data: Vec<u8>) -> Self {
         let viewer_data = DataViewer::load(&base_info.encoding, data.as_slice());

@@ -6,7 +6,7 @@ use eframe::{
     emath::Align,
     Frame,
 };
-use egui_file::{DialogType, FileDialog};
+use crate::file_dialog_helper::NativeFileDialog;
 use flume::{unbounded, TryRecvError};
 use log::{error, info, warn};
 use static_toml::static_toml;
@@ -49,7 +49,8 @@ pub struct HammerApp {
     sender_to_zenoh: Option<Sender<MsgGuiToZenoh>>,
     receiver_from_zenoh: Option<Receiver<MsgZenohToGui>>,
     opened_file: Option<PathBuf>,
-    file_dialog: Option<FileDialog>,
+    file_dialog_open: Option<NativeFileDialog>,
+    file_dialog_save: Option<NativeFileDialog>,
     show_help_about: bool,
     selected_page: Page,
     p_session: PageSession,
@@ -65,7 +66,8 @@ impl Default for HammerApp {
             receiver_from_zenoh: None,
             app_config_path: None,
             opened_file: None,
-            file_dialog: None,
+            file_dialog_open: None,
+            file_dialog_save: None,
             show_help_about: false,
             selected_page: Page::Session,
             p_session: PageSession::default(),
@@ -119,45 +121,41 @@ impl HammerApp {
             }
         }
 
-        if let Some(dialog) = &mut self.file_dialog {
-            if dialog.show(ctx).selected() {
-                match dialog.dialog_type() {
-                    DialogType::SelectFolder => {
-                        return;
-                    }
-                    DialogType::OpenFile => {
-                        if let Some(file) = dialog.path() {
-                            let file = file.to_path_buf();
-                            match self.load_from_file(file.as_path()) {
-                                Ok(o) => {
-                                    self.write_last_opened_file_path(file.as_path());
-                                    info!("{}", o);
-                                }
-                                Err(e) => {
-                                    warn!("{}", e);
-                                }
-                            }
+        if let Some(dialog) = &self.file_dialog_open {
+            if let Some(result) = dialog.try_recv() {
+                if let Some(file) = result {
+                    match self.load_from_file(file.as_path()) {
+                        Ok(o) => {
+                            self.write_last_opened_file_path(file.as_path());
+                            info!("{}", o);
                         }
-                    }
-                    DialogType::SaveFile => {
-                        if let Some(file) = dialog.path() {
-                            let file = file.to_path_buf();
-                            match self.store_to_file(file.as_path()) {
-                                Ok(_) => {
-                                    info!("save file: {}", file.to_string_lossy());
-                                    self.write_last_opened_file_path(file.as_path());
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "save file err, path: {} \n{}",
-                                        file.to_string_lossy(),
-                                        e
-                                    );
-                                }
-                            }
+                        Err(e) => {
+                            warn!("{}", e);
                         }
                     }
                 }
+                self.file_dialog_open = None;
+            }
+        }
+
+        if let Some(dialog) = &self.file_dialog_save {
+            if let Some(result) = dialog.try_recv() {
+                if let Some(file) = result {
+                    match self.store_to_file(file.as_path()) {
+                        Ok(_) => {
+                            info!("save file: {}", file.to_string_lossy());
+                            self.write_last_opened_file_path(file.as_path());
+                        }
+                        Err(e) => {
+                            warn!(
+                                "save file err, path: {} \n{}",
+                                file.to_string_lossy(),
+                                e
+                            );
+                        }
+                    }
+                }
+                self.file_dialog_save = None;
             }
         }
 
@@ -173,11 +171,7 @@ impl HammerApp {
                     return;
                 }
 
-                let mut dialog = FileDialog::open_file(self.opened_file.clone())
-                    .show_new_folder(false)
-                    .show_rename(false);
-                dialog.open();
-                self.file_dialog = Some(dialog);
+                self.file_dialog_open = Some(NativeFileDialog::open(self.opened_file.clone()));
             }
 
             if ui.add(Button::new("save")).clicked() {
@@ -191,20 +185,12 @@ impl HammerApp {
                         }
                     }
                 } else {
-                    let mut dialog = FileDialog::save_file(self.opened_file.clone())
-                        .show_new_folder(true)
-                        .show_rename(true);
-                    dialog.open();
-                    self.file_dialog = Some(dialog);
+                    self.file_dialog_save = Some(NativeFileDialog::save(self.opened_file.clone()));
                 }
             }
 
             if ui.add(Button::new("save as ..")).clicked() {
-                let mut dialog = FileDialog::save_file(self.opened_file.clone())
-                    .show_new_folder(true)
-                    .show_rename(true);
-                dialog.open();
-                self.file_dialog = Some(dialog);
+                self.file_dialog_save = Some(NativeFileDialog::save(self.opened_file.clone()));
             }
         });
 
