@@ -160,7 +160,7 @@ impl PageSub {
             let elapsed = now
                 .duration_since(self.auto_update_last_time)
                 .unwrap_or(Duration::from_secs(1));
-            if elapsed >= Duration::from_millis(100) {
+            if elapsed >= Duration::from_millis(16) {
                 if let Some(data_group) = self.sub_data_group.get(&self.viewed_sub_id) {
                     if let Some(dv) = data_group.map.get(&self.viewed_key) {
                         if let Some((sample, _)) = dv.deque.back() {

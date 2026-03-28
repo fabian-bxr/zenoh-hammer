@@ -41,6 +41,19 @@ path = "examples/show_sample_viewer.rs"
 name = "show_payload_editor"
 path = "examples/show_payload_editor.rs"
 
+# Optimize image decoders in dev builds — pure-Rust codecs are 10-50x slower unoptimized.
+# Note: [profile.dev.package."*"] would be ideal but breaks static-toml's include_toml! macro.
+[profile.dev.package.image]
+opt-level = 2
+[profile.dev.package.zune-jpeg]
+opt-level = 2
+[profile.dev.package.png]
+opt-level = 2
+[profile.dev.package.gif]
+opt-level = 2
+[profile.dev.package.image-webp]
+opt-level = 2
+
 [profile.release-lto]
 inherits = "release"
 lto = true

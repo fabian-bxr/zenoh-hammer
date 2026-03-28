@@ -1,0 +1,13 @@
+{
+  mode: "client",
+  connect: {
+    endpoints: [
+      "tcp/192.168.178.69:7447"
+    ]
+  },
+  transport: {
+    shared_memory: {
+      enabled: false
+    }
+  }
+}
