@@ -1,3 +1,5 @@
+#[path = "../src/file_dialog_helper.rs"]
+mod file_dialog_helper;
 #[path = "../src/hex_viewer.rs"]
 mod hex_viewer;
 #[path = "../src/payload_editor.rs"]
