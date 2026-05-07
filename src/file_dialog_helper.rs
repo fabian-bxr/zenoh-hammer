@@ -9,7 +9,8 @@ impl NativeFileDialog {
     pub fn open(initial_path: Option<PathBuf>) -> Self {
         let (tx, rx) = unbounded();
         std::thread::spawn(move || {
-            let mut dialog = rfd::FileDialog::new();
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter("Zenoh Config", &["json", "json5", "toml"]);
             if let Some(dir) = initial_path.as_ref().and_then(|p| p.parent()) {
                 dialog = dialog.set_directory(dir);
             }

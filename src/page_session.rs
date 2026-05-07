@@ -8,6 +8,7 @@ use egui_json_tree::JsonTree;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use toml;
 use std::{
     collections::{BTreeMap, VecDeque},
     fs,
@@ -253,12 +254,32 @@ impl ConfigFileData {
             }
         };
 
-        let serde_json_value = match json5::from_str::<serde_json::Value>(source.as_str()) {
-            Ok(o) => o,
-            Err(e) => {
-                warn!("failed to load config file, {}", e);
-                self.err_str = Some("failed to load config file".to_string());
-                return;
+        let is_toml = p.extension().and_then(|e| e.to_str()) == Some("toml");
+
+        let serde_json_value: serde_json::Value = if is_toml {
+            match toml::from_str::<toml::Value>(source.as_str()) {
+                Ok(tv) => match serde_json::to_value(tv) {
+                    Ok(jv) => jv,
+                    Err(e) => {
+                        warn!("failed to convert toml to json, {}", e);
+                        self.err_str = Some("failed to parse config file".to_string());
+                        return;
+                    }
+                },
+                Err(e) => {
+                    warn!("failed to parse toml config file, {}", e);
+                    self.err_str = Some("failed to parse config file".to_string());
+                    return;
+                }
+            }
+        } else {
+            match json5::from_str::<serde_json::Value>(source.as_str()) {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!("failed to parse config file, {}", e);
+                    self.err_str = Some("failed to parse config file".to_string());
+                    return;
+                }
             }
         };
 
