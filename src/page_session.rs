@@ -1,6 +1,6 @@
 use eframe::egui::{
-    Align, CentralPanel, Color32, Context, Grid, Layout, RichText, ScrollArea, SidePanel, TextEdit,
-    TextStyle, Ui, Widget,
+    Align, CentralPanel, CollapsingHeader, Color32, Context, Grid, Layout, RichText, ScrollArea,
+    SidePanel, TextEdit, TextStyle, Ui, Widget,
 };
 use egui_dnd::dnd;
 use crate::file_dialog_helper::NativeFileDialog;
@@ -14,11 +14,14 @@ use std::{
     fs,
     path::PathBuf,
     str::FromStr,
+    time::{Duration, Instant},
 };
+use crate::task_zenoh::SessionInfoData;
 
 pub enum Event {
     Connect(Box<(u64, PathBuf)>),
     Disconnect,
+    RequestSessionInfo,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -299,6 +302,8 @@ pub struct PageSession {
     config_files: BTreeMap<u64, ConfigFileData>,
     dnd_items: Vec<DndItem>,
     file_dialog: Option<NativeFileDialog>,
+    pub session_info: Option<SessionInfoData>,
+    session_info_timer: Option<Instant>,
 }
 
 impl Default for PageSession {
@@ -311,6 +316,8 @@ impl Default for PageSession {
             config_files: BTreeMap::new(),
             dnd_items: Vec::new(),
             file_dialog: None,
+            session_info: None,
+            session_info_timer: None,
         }
     }
 }
@@ -352,6 +359,22 @@ impl PageSession {
             });
 
         CentralPanel::default().show(ctx, |ui| {
+            if self.connected_config_file_id.is_some() {
+                let should_refresh = self
+                    .session_info_timer
+                    .map(|t| t.elapsed() >= Duration::from_secs(2))
+                    .unwrap_or(true);
+                if should_refresh {
+                    self.events.push_back(Event::RequestSessionInfo);
+                    self.session_info_timer = Some(Instant::now());
+                }
+                show_session_info_panel(ui, self.session_info.as_ref());
+                ui.separator();
+            } else {
+                self.session_info = None;
+                self.session_info_timer = None;
+            }
+
             if let Some(config_file_data) = self.config_files.get_mut(&self.selected_config_file_id)
             {
                 config_file_data.show(ui, self.connected_config_file_id, &mut self.events);
@@ -503,4 +526,44 @@ enum FilePage {
     Source,
     Format,
     Tree,
+}
+
+fn show_session_info_panel(ui: &mut Ui, info: Option<&SessionInfoData>) {
+    CollapsingHeader::new("Session")
+        .default_open(true)
+        .show(ui, |ui| {
+            let Some(info) = info else {
+                ui.label(RichText::new("connecting...").italics());
+                return;
+            };
+            Grid::new("session_info_grid")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("own zid:");
+                    ui.label(RichText::new(&info.zid).monospace());
+                    ui.end_row();
+
+                    ui.label("peers:");
+                    ui.vertical(|ui| {
+                        if info.peers.is_empty() {
+                            ui.label(RichText::new("-").monospace());
+                        }
+                        for peer in &info.peers {
+                            ui.label(RichText::new(peer).monospace());
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("routers:");
+                    ui.vertical(|ui| {
+                        if info.routers.is_empty() {
+                            ui.label(RichText::new("-").monospace());
+                        }
+                        for router in &info.routers {
+                            ui.label(RichText::new(router).monospace());
+                        }
+                    });
+                    ui.end_row();
+                });
+        });
 }

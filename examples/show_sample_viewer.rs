@@ -17,7 +17,7 @@ use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use uhlc::{Timestamp, ID, NTP64};
 use zenoh::{
     bytes::{Encoding, ZBytes},
-    sample::{SampleKind, SourceInfo},
+    sample::SampleKind,
 };
 
 use crate::{
@@ -114,7 +114,7 @@ fn example_base_info() -> SampleInfo {
     let priority = ZPriority::RealTime;
     let reliability = ZReliability::Reliable;
     let express = true;
-    let source_info = SourceInfo::new(None, Some(123));
+    let source_info = None;
     let attachment = b"a=1".to_vec();
     let bytes_type = BytesType::Raw;
 

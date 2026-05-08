@@ -22,6 +22,12 @@ use zenoh::{
 pub type Sender<T> = flume::Sender<T>;
 pub type Receiver<T> = flume::Receiver<T>;
 
+pub struct SessionInfoData {
+    pub zid: String,
+    pub peers: Vec<String>,
+    pub routers: Vec<String>,
+}
+
 pub struct SubData {
     pub id: u64,
     pub key_expr: OwnedKeyExpr,
@@ -55,6 +61,7 @@ pub enum MsgGuiToZenoh {
     DelSubReq(u64),          // sub id
     GetReq(Box<QueryData>),
     PutReq(Box<PutData>),
+    GetSessionInfo,
 }
 
 pub enum MsgZenohToGui {
@@ -64,6 +71,7 @@ pub enum MsgZenohToGui {
     SubCB(Box<(u64, Sample, SystemTime)>),   // (sub id, value, timestamp)
     GetRes(Box<(u64, Reply)>),               // (get id, result, timestamp)
     PutRes(Box<(u64, bool, String)>),        // true 表示成功， false表示失败
+    SessionInfo(Box<SessionInfoData>),
 }
 
 pub fn start_async(
@@ -173,6 +181,9 @@ async fn loop_zenoh(
             MsgGuiToZenoh::GetReq(req) => {
                 task::spawn(task_query(session.clone(), req, sender_to_gui.clone()));
             }
+            MsgGuiToZenoh::GetSessionInfo => {
+                task::spawn(task_session_info(session.clone(), sender_to_gui.clone()));
+            }
             MsgGuiToZenoh::PutReq(p) => {
                 let pd = *p;
                 if let Err(e) = session
@@ -234,6 +245,28 @@ async fn task_subscriber(
         }
     }
     info!("task_subscriber exit");
+}
+
+async fn task_session_info(session: Session, sender: Sender<MsgZenohToGui>) {
+    let info = session.info();
+    let zid = info.zid().await.to_string();
+    let peers = info
+        .peers_zid()
+        .await
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
+    let routers = info
+        .routers_zid()
+        .await
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
+    let _ = sender.send(MsgZenohToGui::SessionInfo(Box::new(SessionInfoData {
+        zid,
+        peers,
+        routers,
+    })));
 }
 
 async fn task_query(session: Session, data: Box<QueryData>, sender_to_gui: Sender<MsgZenohToGui>) {
