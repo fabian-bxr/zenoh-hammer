@@ -142,7 +142,7 @@ impl ReplyInfo {
                 let priority = Some(sample.priority().clone().into());
                 let reliability = Some(sample.reliability().clone().into());
                 let express = Some(sample.express());
-                let source_info = Some(sample.source_info().clone());
+                let source_info = sample.source_info().cloned();
                 let attachment = sample.attachment().map(|s| s.to_bytes().to_vec());
 
                 ReplyInfo {
@@ -229,23 +229,13 @@ impl ReplyInfo {
 
             if let Some(source_info) = &self.source_info {
                 ui.label("source_info. id:");
-                let s = match source_info.source_id() {
-                    None => "-".to_string(),
-                    Some(o) => {
-                        format!("{:?}", o)
-                    }
-                };
+                let s = format!("{:?}", source_info.source_id());
                 let text = RichText::new(s).monospace();
                 ui.label(text);
                 ui.end_row();
 
                 ui.label("source_info. sn:");
-                let s = match source_info.source_sn() {
-                    None => "-".to_string(),
-                    Some(o) => {
-                        format!("{}", o)
-                    }
-                };
+                let s = format!("{}", source_info.source_sn());
                 let text = RichText::new(s).monospace();
                 ui.label(text);
                 ui.end_row();

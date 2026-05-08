@@ -699,7 +699,7 @@ impl DataValues {
         let mut system_time_max = UNIX_EPOCH;
         let mut system_time_min = system_time_max.add(Duration::from_secs(3600 * 24 * 365 * 100));
         let mut count = 0f32;
-        let mut time = 1f32;
+        let mut time = 0f32;
         for (i, d) in self.deque.iter().rev().enumerate() {
             let t = d.1;
             system_time_max = system_time_max.max(t);
@@ -708,13 +708,16 @@ impl DataValues {
             time = system_time_max
                 .duration_since(system_time_min)
                 .unwrap_or(Duration::default())
-                .as_secs() as f32;
+                .as_secs_f32();
             if i >= 100 {
                 break;
             }
             if time >= 10.0 {
                 break;
             }
+        }
+        if time < 1e-6 {
+            return None;
         }
         let fr = count / time;
 

@@ -350,6 +350,9 @@ impl HammerApp {
                 MsgZenohToGui::PutRes(r) => {
                     self.p_put.processing_put_res(r);
                 }
+                MsgZenohToGui::SessionInfo(data) => {
+                    self.p_session.session_info = Some(*data);
+                }
             }
         }
     }
@@ -380,6 +383,11 @@ impl HammerApp {
                     if let Some(sender) = &self.sender_to_zenoh {
                         let _ = sender.send(MsgGuiToZenoh::Close);
                         self.sender_to_zenoh = None;
+                    }
+                }
+                Event::RequestSessionInfo => {
+                    if let Some(sender) = &self.sender_to_zenoh {
+                        let _ = sender.send(MsgGuiToZenoh::GetSessionInfo);
                     }
                 }
             }
