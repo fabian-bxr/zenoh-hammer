@@ -12,6 +12,7 @@ use zenoh::{
     bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
     key_expr::OwnedKeyExpr,
+    liveliness::LivelinessToken,
     pubsub::Subscriber,
     qos::{CongestionControl, Priority},
     query::{QueryConsolidation, QueryTarget, Reply},
@@ -55,23 +56,50 @@ pub struct QueryData {
     pub value: Option<(Encoding, ZBytes)>,
 }
 
+pub struct LivelinessTokenData {
+    pub id: u64,
+    pub key_expr: OwnedKeyExpr,
+}
+
+pub struct LivelinessSubData {
+    pub id: u64,
+    pub key_expr: OwnedKeyExpr,
+}
+
+pub struct AdminQueryData {
+    pub id: u64,
+    pub key_expr: String,
+    pub timeout_ms: u64,
+}
+
 pub enum MsgGuiToZenoh {
     Close,
-    AddSubReq(Box<SubData>), // (sub id,key)
-    DelSubReq(u64),          // sub id
+    AddSubReq(Box<SubData>),
+    DelSubReq(u64),
     GetReq(Box<QueryData>),
     PutReq(Box<PutData>),
     GetSessionInfo,
+    DeclareLivelinessToken(Box<LivelinessTokenData>),
+    UndeclareLivelinessToken(u64),
+    AddLivelinessSubReq(Box<LivelinessSubData>),
+    DelLivelinessSubReq(u64),
+    AdminQueryReq(Box<AdminQueryData>),
 }
 
 pub enum MsgZenohToGui {
-    OpenSession(Result<u64, (u64, String)>), // Ok表示成功， Err表示失败
-    AddSubRes(Box<(u64, Result<(), String>)>), // sub id, true 表示成功, false表示失败
-    DelSubRes(u64),                          // sub id
-    SubCB(Box<(u64, Sample, SystemTime)>),   // (sub id, value, timestamp)
-    GetRes(Box<(u64, Reply)>),               // (get id, result, timestamp)
-    PutRes(Box<(u64, bool, String)>),        // true 表示成功， false表示失败
+    OpenSession(Result<u64, (u64, String)>),
+    AddSubRes(Box<(u64, Result<(), String>)>),
+    DelSubRes(u64),
+    SubCB(Box<(u64, Sample, SystemTime)>),
+    GetRes(Box<(u64, Reply)>),
+    PutRes(Box<(u64, bool, String)>),
     SessionInfo(Box<SessionInfoData>),
+    DeclareLivelinessTokenRes(Box<(u64, Result<(), String>)>),
+    AddLivelinessSubRes(Box<(u64, Result<(), String>)>),
+    DelLivelinessSubRes(u64),
+    LivelinessSubCB(Box<(u64, Sample, SystemTime)>),
+    AdminQueryRes(Box<(u64, String, String, Vec<u8>, bool)>), // (query_id, key, encoding, payload, is_ok)
+    AdminQueryDone(u64),
 }
 
 pub fn start_async(
@@ -122,6 +150,8 @@ async fn loop_zenoh(
     let _ = sender_to_gui.send(MsgZenohToGui::OpenSession(Ok(id)));
 
     let mut subscriber_senders: BTreeMap<u64, Sender<()>> = BTreeMap::new();
+    let mut liveliness_tokens: BTreeMap<u64, LivelinessToken> = BTreeMap::new();
+    let mut liveliness_senders: BTreeMap<u64, Sender<()>> = BTreeMap::new();
 
     'a: loop {
         let try_read = receiver_from_gui.try_recv();
@@ -184,6 +214,57 @@ async fn loop_zenoh(
             MsgGuiToZenoh::GetSessionInfo => {
                 task::spawn(task_session_info(session.clone(), sender_to_gui.clone()));
             }
+            MsgGuiToZenoh::DeclareLivelinessToken(data) => {
+                let LivelinessTokenData { id, key_expr } = *data;
+                match session.liveliness().declare_token(key_expr).await {
+                    Ok(token) => {
+                        liveliness_tokens.insert(id, token);
+                        let _ = sender_to_gui.send(MsgZenohToGui::DeclareLivelinessTokenRes(
+                            Box::new((id, Ok(()))),
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = sender_to_gui.send(MsgZenohToGui::DeclareLivelinessTokenRes(
+                            Box::new((id, Err(e.to_string()))),
+                        ));
+                    }
+                }
+            }
+            MsgGuiToZenoh::UndeclareLivelinessToken(id) => {
+                liveliness_tokens.remove(&id);
+            }
+            MsgGuiToZenoh::AddLivelinessSubReq(data) => {
+                let LivelinessSubData { id, key_expr } = *data;
+                match session.liveliness().declare_subscriber(key_expr).await {
+                    Ok(subscriber) => {
+                        let (close_sender, close_receiver) = unbounded();
+                        liveliness_senders.insert(id, close_sender);
+                        task::spawn(task_liveliness_subscriber(
+                            id,
+                            subscriber,
+                            close_receiver,
+                            sender_to_gui.clone(),
+                        ));
+                        let _ = sender_to_gui.send(MsgZenohToGui::AddLivelinessSubRes(Box::new(
+                            (id, Ok(())),
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = sender_to_gui.send(MsgZenohToGui::AddLivelinessSubRes(Box::new(
+                            (id, Err(e.to_string())),
+                        )));
+                    }
+                }
+            }
+            MsgGuiToZenoh::DelLivelinessSubReq(id) => {
+                if let Some(sender) = liveliness_senders.remove(&id) {
+                    let _ = sender.send(());
+                }
+                let _ = sender_to_gui.send(MsgZenohToGui::DelLivelinessSubRes(id));
+            }
+            MsgGuiToZenoh::AdminQueryReq(data) => {
+                task::spawn(task_admin_query(session.clone(), data, sender_to_gui.clone()));
+            }
             MsgGuiToZenoh::PutReq(p) => {
                 let pd = *p;
                 if let Err(e) = session
@@ -208,6 +289,13 @@ async fn loop_zenoh(
     for (sub_id, sender) in subscriber_senders {
         let _ = sender.send(());
         let _ = sender_to_gui.send(MsgZenohToGui::DelSubRes(sub_id));
+    }
+
+    drop(liveliness_tokens);
+
+    for (id, sender) in liveliness_senders {
+        let _ = sender.send(());
+        let _ = sender_to_gui.send(MsgZenohToGui::DelLivelinessSubRes(id));
     }
 
     info!("session closed");
@@ -267,6 +355,70 @@ async fn task_session_info(session: Session, sender: Sender<MsgZenohToGui>) {
         peers,
         routers,
     })));
+}
+
+async fn task_liveliness_subscriber(
+    id: u64,
+    subscriber: Subscriber<FifoChannelHandler<Sample>>,
+    close_receiver: Receiver<()>,
+    sender_to_gui: Sender<MsgZenohToGui>,
+) {
+    'a: loop {
+        let r: Result<Sample, RecvError> = select!(
+            sample = subscriber.recv_async() => {
+                sample.map_err(|_| RecvError::Disconnected)
+            },
+            _ = close_receiver.recv_async() => {
+                Err(RecvError::Disconnected)
+            },
+        );
+        match r {
+            Ok(sample) => {
+                let t = SystemTime::now();
+                let _ = sender_to_gui.send(MsgZenohToGui::LivelinessSubCB(Box::new((id, sample, t))));
+            }
+            Err(_) => break 'a,
+        }
+    }
+}
+
+async fn task_admin_query(
+    session: Session,
+    data: Box<AdminQueryData>,
+    sender_to_gui: Sender<MsgZenohToGui>,
+) {
+    let id = data.id;
+    let timeout = Duration::from_millis(data.timeout_ms);
+    info!("task_admin_query entry, key \"{}\"", data.key_expr);
+
+    let replies = match session.get(data.key_expr.as_str()).timeout(timeout).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("admin query error: {}", e);
+            let _ = sender_to_gui.send(MsgZenohToGui::AdminQueryDone(id));
+            return;
+        }
+    };
+
+    while let Ok(reply) = replies.recv_async().await {
+        let (key, encoding, payload, is_ok) = match reply.result() {
+            Ok(sample) => {
+                let key = sample.key_expr().to_string();
+                let encoding = sample.encoding().to_string();
+                let payload = sample.payload().to_bytes().to_vec();
+                (key, encoding, payload, true)
+            }
+            Err(err) => {
+                let encoding = err.encoding().to_string();
+                let payload = err.payload().to_bytes().to_vec();
+                (String::new(), encoding, payload, false)
+            }
+        };
+        let _ = sender_to_gui.send(MsgZenohToGui::AdminQueryRes(Box::new((id, key, encoding, payload, is_ok))));
+    }
+
+    let _ = sender_to_gui.send(MsgZenohToGui::AdminQueryDone(id));
+    info!("task_admin_query exit");
 }
 
 async fn task_query(session: Session, data: Box<QueryData>, sender_to_gui: Sender<MsgZenohToGui>) {
