@@ -195,10 +195,13 @@ impl ConfigFileData {
         &mut self,
         ui: &mut Ui,
         connected_config_file_id: Option<u64>,
+        connecting_config_file_id: &mut Option<u64>,
         events: &mut VecDeque<Event>,
     ) {
         let is_connected = connected_config_file_id == Some(self.id);
-        self.show_name_path(ui, is_connected, events);
+        let is_connecting = *connecting_config_file_id == Some(self.id);
+        let any_busy = connected_config_file_id.is_some() || connecting_config_file_id.is_some();
+        self.show_name_path(ui, is_connected, is_connecting, any_busy, connecting_config_file_id, events);
 
         ui.add_space(10.0);
 
@@ -264,6 +267,9 @@ impl ConfigFileData {
         &mut self,
         ui: &mut Ui,
         is_connected: bool,
+        is_connecting: bool,
+        any_busy: bool,
+        connecting_config_file_id: &mut Option<u64>,
         events: &mut VecDeque<Event>,
     ) {
         Grid::new("page_session_config_file")
@@ -275,10 +281,11 @@ impl ConfigFileData {
                         if ui.selectable_label(true, "close session").clicked() {
                             events.push_back(Event::Disconnect);
                         }
+                    } else if is_connecting {
+                        ui.add_enabled(false, Button::new("connecting..."));
                     } else {
-                        if ui.selectable_label(false, "open session").clicked() {
+                        if ui.add_enabled(!any_busy, Button::new("open session")).clicked() {
                             self.err_str = None;
-                            // Auto-save unsaved edits before connecting.
                             if self.is_dirty {
                                 self.try_save();
                                 if self.err_str.is_some() {
@@ -286,6 +293,7 @@ impl ConfigFileData {
                                 }
                             }
                             if let Some(path_buf) = &self.path {
+                                *connecting_config_file_id = Some(self.id);
                                 let event = Event::Connect(Box::new((self.id, path_buf.clone())));
                                 events.push_back(event);
                             } else {
@@ -334,6 +342,7 @@ impl ConfigFileData {
 pub struct PageSession {
     pub events: VecDeque<Event>,
     connected_config_file_id: Option<u64>,
+    connecting_config_file_id: Option<u64>,
     selected_config_file_id: u64,
     config_file_id_count: u64,
     config_files: BTreeMap<u64, ConfigFileData>,
@@ -348,6 +357,7 @@ impl Default for PageSession {
         PageSession {
             events: VecDeque::new(),
             connected_config_file_id: None,
+            connecting_config_file_id: None,
             selected_config_file_id: 0,
             config_file_id_count: 0,
             config_files: BTreeMap::new(),
@@ -424,7 +434,12 @@ impl PageSession {
                     let path = config_file_data.path.clone().unwrap();
                     config_file_data.load_from_file(path);
                 }
-                config_file_data.show(ui, self.connected_config_file_id, &mut self.events);
+                config_file_data.show(
+                    ui,
+                    self.connected_config_file_id,
+                    &mut self.connecting_config_file_id,
+                    &mut self.events,
+                );
             }
         });
 
@@ -485,6 +500,7 @@ impl PageSession {
     }
 
     pub fn set_connect_result(&mut self, r: Result<u64, (u64, String)>) {
+        self.connecting_config_file_id = None;
         match r {
             Ok(id) => {
                 self.connected_config_file_id = Some(id);
@@ -540,12 +556,10 @@ impl PageSession {
                     self.dnd_items.as_mut_slice(),
                     |ui, item, handle, _state| {
                         if let Some(d) = self.config_files.get(&item.id) {
-                            let mut text = if let Some(id) = self.connected_config_file_id {
-                                if id == item.id {
-                                    RichText::new(d.name.as_str()).underline().strong()
-                                } else {
-                                    RichText::new(d.name.as_str())
-                                }
+                            let mut text = if self.connected_config_file_id == Some(item.id) {
+                                RichText::new(d.name.as_str()).underline().strong()
+                            } else if self.connecting_config_file_id == Some(item.id) {
+                                RichText::new(d.name.as_str()).italics()
                             } else {
                                 RichText::new(d.name.as_str())
                             };
