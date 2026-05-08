@@ -1,6 +1,6 @@
 use eframe::egui::{
-    Align, CentralPanel, CollapsingHeader, Color32, Context, Grid, Layout, RichText, ScrollArea,
-    SidePanel, TextEdit, TextStyle, Ui, Widget,
+    Align, Button, CentralPanel, CollapsingHeader, Color32, Context, Grid, Layout, RichText,
+    ScrollArea, SidePanel, TextEdit, TextStyle, Ui, Widget,
 };
 use egui_dnd::dnd;
 use crate::file_dialog_helper::NativeFileDialog;
@@ -13,7 +13,6 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fs,
     path::PathBuf,
-    str::FromStr,
     time::{Duration, Instant},
 };
 use crate::task_zenoh::SessionInfoData;
@@ -45,6 +44,8 @@ struct ConfigFileData {
     source: String,
     format: String,
     serde_json_value: serde_json::Value,
+    is_toml: bool,
+    is_dirty: bool,
 }
 
 impl From<&ConfigFileData> for ArchiveConfigFileData {
@@ -53,7 +54,6 @@ impl From<&ConfigFileData> for ArchiveConfigFileData {
             None => String::new(),
             Some(o) => o.to_string_lossy().to_string(),
         };
-
         ArchiveConfigFileData {
             name: value.name.clone(),
             path,
@@ -63,182 +63,107 @@ impl From<&ConfigFileData> for ArchiveConfigFileData {
 
 impl TryFrom<&ArchiveConfigFileData> for ConfigFileData {
     type Error = String;
-
     fn try_from(value: &ArchiveConfigFileData) -> Result<Self, Self::Error> {
-        Ok(ConfigFileData {
-            id: 0,
-            name: value.name.clone(),
-            path: PathBuf::from_str(value.path.as_str()).ok(),
-            path_str: String::new(),
-            err_str: None,
-            selected_page: FilePage::Source,
-            source: String::new(),
-            format: String::new(),
-            serde_json_value: serde_json::Value::Null,
-        })
+        let path_str = value.path.clone();
+        let path = if path_str.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(&path_str))
+        };
+        let is_toml = path.as_ref()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str()) == Some("toml");
+        Ok(ConfigFileData::blank(value.name.clone(), path, path_str, is_toml))
     }
 }
 
 impl TryFrom<ArchiveConfigFileData> for ConfigFileData {
     type Error = String;
-
     fn try_from(value: ArchiveConfigFileData) -> Result<Self, Self::Error> {
-        Ok(ConfigFileData {
-            id: 0,
-            name: value.name,
-            path: PathBuf::from_str(value.path.as_str()).ok(),
-            path_str: String::new(),
-            err_str: None,
-            selected_page: FilePage::Source,
-            source: String::new(),
-            format: String::new(),
-            serde_json_value: serde_json::Value::Null,
-        })
+        ConfigFileData::try_from(&value)
     }
 }
 
 impl ConfigFileData {
     fn new(name: String, path: PathBuf) -> Self {
+        let is_toml = path.extension().and_then(|e| e.to_str()) == Some("toml");
+        let path_str = path.to_string_lossy().to_string();
+        ConfigFileData::blank(name, Some(path), path_str, is_toml)
+    }
+
+    fn new_template() -> Self {
+        let source = "mode = \"peer\"\n".to_string();
+        let mut cfg = ConfigFileData::blank("new config".to_string(), None, String::new(), true);
+        cfg.is_dirty = true;
+        cfg.parse_source_into_self(&source);
+        cfg.source = source;
+        cfg
+    }
+
+    fn blank(name: String, path: Option<PathBuf>, path_str: String, is_toml: bool) -> Self {
         ConfigFileData {
             id: 0,
             name,
-            path: Some(path),
-            path_str: String::new(),
+            path,
+            path_str,
             err_str: None,
             selected_page: FilePage::Source,
             source: String::new(),
             format: String::new(),
             serde_json_value: serde_json::Value::Null,
+            is_toml,
+            is_dirty: false,
         }
     }
 
-    fn show(
-        &mut self,
-        ui: &mut Ui,
-        connected_config_file_id: Option<u64>,
-        events: &mut VecDeque<Event>,
-    ) {
-        self.show_name_path(ui, connected_config_file_id, events);
-
-        if let Some(s) = &self.err_str {
-            ui.label(RichText::new(s).color(Color32::RED));
+    /// Parse `source` and update `format` and `serde_json_value`. Returns false on parse error.
+    fn parse_source_into_self(&mut self, source: &str) -> bool {
+        let result: Result<serde_json::Value, String> = if self.is_toml {
+            toml::from_str::<toml::Value>(source)
+                .map_err(|e| e.to_string())
+                .and_then(|tv| serde_json::to_value(tv).map_err(|e| e.to_string()))
+        } else {
+            json5::from_str::<serde_json::Value>(source).map_err(|e| e.to_string())
+        };
+        match result {
+            Ok(value) => {
+                self.format = serde_json::to_string_pretty(&value).unwrap_or_default();
+                self.serde_json_value = value;
+                true
+            }
+            Err(e) => {
+                self.format = String::new();
+                self.serde_json_value = serde_json::Value::Null;
+                self.err_str = Some(format!("parse error: {e}"));
+                false
+            }
         }
-
-        ui.add_space(10.0);
-
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(self.selected_page == FilePage::Source, "source")
-                .clicked()
-            {
-                self.selected_page = FilePage::Source;
-            }
-
-            if ui
-                .selectable_label(self.selected_page == FilePage::Format, "format")
-                .clicked()
-            {
-                self.selected_page = FilePage::Format;
-            }
-
-            if ui
-                .selectable_label(self.selected_page == FilePage::Tree, "tree")
-                .clicked()
-            {
-                self.selected_page = FilePage::Tree;
-            }
-        });
-
-        ui.add_space(4.0);
-
-        ScrollArea::both()
-            .auto_shrink([false, true])
-            .show(ui, |ui| match self.selected_page {
-                FilePage::Source => {
-                    TextEdit::multiline(&mut self.source)
-                        .desired_width(f32::INFINITY)
-                        .code_editor()
-                        .interactive(false)
-                        .ui(ui);
-                }
-                FilePage::Format => {
-                    TextEdit::multiline(&mut self.format)
-                        .desired_width(f32::INFINITY)
-                        .code_editor()
-                        .interactive(false)
-                        .ui(ui);
-                }
-                FilePage::Tree => {
-                    JsonTree::new("page_session_json_tree", &self.serde_json_value).show(ui);
-                }
-            });
     }
 
-    fn show_name_path(
-        &mut self,
-        ui: &mut Ui,
-        connected_config_file_id: Option<u64>,
-        events: &mut VecDeque<Event>,
-    ) {
-        Grid::new("page_session_config_file")
-            .num_columns(2)
-            .show(ui, |ui| {
-                ui.label("name");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let mut flag_self_connected = false;
+    fn try_save(&mut self) {
+        // If no path is set yet, try to use whatever is typed in path_str.
+        if self.path.is_none() && !self.path_str.trim().is_empty() {
+            let p = PathBuf::from(self.path_str.trim());
+            self.is_toml = p.extension().and_then(|e| e.to_str()) == Some("toml");
+            self.path = Some(p);
+        }
 
-                    if let Some(id) = connected_config_file_id {
-                        flag_self_connected = id == self.id;
-                        ui.add_enabled_ui(flag_self_connected, |ui| {
-                            if ui
-                                .selectable_label(flag_self_connected, "close session")
-                                .clicked()
-                            {
-                                events.push_back(Event::Disconnect);
-                            }
-                        });
-                    } else {
-                        if ui.selectable_label(false, "open session").clicked() {
-                            self.err_str = None;
-                            if let Some(path_buf) = &self.path {
-                                let event = Event::Connect(Box::new((self.id, path_buf.clone())));
-                                events.push_back(event);
-                            } else {
-                                self.err_str = Some("no file path".to_string());
-                            }
-                        }
-                    }
+        let Some(path) = &self.path else {
+            self.err_str = Some("Enter a file path below, then save.".to_string());
+            return;
+        };
 
-                    ui.add_enabled_ui(!flag_self_connected, |ui| {
-                        if ui.button("load").clicked() {
-                            self.err_str = None;
-                            if let Some(path_buf) = &self.path {
-                                self.load_from_file(path_buf.clone());
-                            } else {
-                                self.err_str = Some("no file path".to_string());
-                            }
-                        }
-                    });
-
-                    TextEdit::singleline(&mut self.name)
-                        .desired_width(3000.0)
-                        .font(TextStyle::Monospace)
-                        .interactive(!flag_self_connected)
-                        .ui(ui);
-                });
-                ui.end_row();
-
-                ui.label("path");
-                if let Some(s) = &self.path {
-                    self.path_str = s.to_string_lossy().to_string();
-                }
-                TextEdit::multiline(&mut self.path_str)
-                    .desired_rows(1)
-                    .desired_width(3000.0)
-                    .font(TextStyle::Monospace)
-                    .ui(ui);
-                ui.end_row();
-            });
+        match fs::write(path, self.source.as_bytes()) {
+            Ok(_) => {
+                self.is_dirty = false;
+                self.err_str = None;
+                info!("saved config to \"{}\"", path.display());
+            }
+            Err(e) => {
+                self.err_str = Some(format!("save failed: {e}"));
+                warn!("failed to save config: {e}");
+            }
+        }
     }
 
     fn load_from_file(&mut self, p: PathBuf) {
@@ -251,46 +176,158 @@ impl ConfigFileData {
         let source = match fs::read_to_string(p.as_path()) {
             Ok(o) => o,
             Err(e) => {
-                warn!("failed to load config file, {}", e);
+                warn!("failed to load config file, {e}");
                 self.err_str = Some("failed to load config file".to_string());
                 return;
             }
         };
 
-        let is_toml = p.extension().and_then(|e| e.to_str()) == Some("toml");
-
-        let serde_json_value: serde_json::Value = if is_toml {
-            match toml::from_str::<toml::Value>(source.as_str()) {
-                Ok(tv) => match serde_json::to_value(tv) {
-                    Ok(jv) => jv,
-                    Err(e) => {
-                        warn!("failed to convert toml to json, {}", e);
-                        self.err_str = Some("failed to parse config file".to_string());
-                        return;
-                    }
-                },
-                Err(e) => {
-                    warn!("failed to parse toml config file, {}", e);
-                    self.err_str = Some("failed to parse config file".to_string());
-                    return;
-                }
-            }
-        } else {
-            match json5::from_str::<serde_json::Value>(source.as_str()) {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!("failed to parse config file, {}", e);
-                    self.err_str = Some("failed to parse config file".to_string());
-                    return;
-                }
-            }
-        };
-
+        self.is_toml = p.extension().and_then(|e| e.to_str()) == Some("toml");
+        if !self.parse_source_into_self(&source) {
+            return;
+        }
         self.source = source;
-        self.format = serde_json::to_string_pretty(&serde_json_value).unwrap_or_default();
-        self.serde_json_value = serde_json_value;
-
+        self.is_dirty = false;
         info!("load config file ok \"{}\"", p.display());
+    }
+
+    fn show(
+        &mut self,
+        ui: &mut Ui,
+        connected_config_file_id: Option<u64>,
+        events: &mut VecDeque<Event>,
+    ) {
+        let is_connected = connected_config_file_id == Some(self.id);
+        self.show_name_path(ui, is_connected, events);
+
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            let source_label = if self.is_dirty { "● source" } else { "source" };
+            if ui.selectable_label(self.selected_page == FilePage::Source, source_label).clicked() {
+                self.selected_page = FilePage::Source;
+            }
+            if ui.selectable_label(self.selected_page == FilePage::Format, "format").clicked() {
+                self.selected_page = FilePage::Format;
+            }
+            if ui.selectable_label(self.selected_page == FilePage::Tree, "tree").clicked() {
+                self.selected_page = FilePage::Tree;
+            }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add_enabled(self.is_dirty && !is_connected, Button::new("save")).clicked() {
+                    self.try_save();
+                }
+            });
+        });
+
+        ui.add_space(4.0);
+
+        // Reserve a fixed strip at the bottom for the error label so the textbox
+        // position never shifts when an error appears or clears.
+        let error_strip = 22.0;
+        ScrollArea::both()
+            .max_height(ui.available_height() - error_strip)
+            .auto_shrink([false, true])
+            .show(ui, |ui| match self.selected_page {
+                FilePage::Source => {
+                    let response = TextEdit::multiline(&mut self.source)
+                        .desired_width(f32::INFINITY)
+                        .code_editor()
+                        .interactive(!is_connected)
+                        .ui(ui);
+                    if response.changed() {
+                        self.is_dirty = true;
+                        self.err_str = None;
+                        let source = self.source.clone();
+                        self.parse_source_into_self(&source);
+                    }
+                }
+                FilePage::Format => {
+                    TextEdit::multiline(&mut self.format)
+                        .desired_width(f32::INFINITY)
+                        .code_editor()
+                        .interactive(false)
+                        .ui(ui);
+                }
+                FilePage::Tree => {
+                    JsonTree::new("page_session_json_tree", &self.serde_json_value).show(ui);
+                }
+            });
+
+        if let Some(s) = &self.err_str {
+            ui.label(RichText::new(s).color(Color32::RED));
+        }
+    }
+
+    fn show_name_path(
+        &mut self,
+        ui: &mut Ui,
+        is_connected: bool,
+        events: &mut VecDeque<Event>,
+    ) {
+        Grid::new("page_session_config_file")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("name");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if is_connected {
+                        if ui.selectable_label(true, "close session").clicked() {
+                            events.push_back(Event::Disconnect);
+                        }
+                    } else {
+                        if ui.selectable_label(false, "open session").clicked() {
+                            self.err_str = None;
+                            // Auto-save unsaved edits before connecting.
+                            if self.is_dirty {
+                                self.try_save();
+                                if self.err_str.is_some() {
+                                    return;
+                                }
+                            }
+                            if let Some(path_buf) = &self.path {
+                                let event = Event::Connect(Box::new((self.id, path_buf.clone())));
+                                events.push_back(event);
+                            } else {
+                                self.err_str = Some("Enter a file path below and save first.".to_string());
+                            }
+                        }
+                    }
+
+                    ui.add_enabled_ui(!is_connected, |ui| {
+                        if ui.add_enabled(self.path.is_some(), Button::new("load")).clicked() {
+                            self.err_str = None;
+                            if let Some(path_buf) = self.path.clone() {
+                                self.load_from_file(path_buf);
+                            }
+                        }
+                    });
+
+                    TextEdit::singleline(&mut self.name)
+                        .desired_width(3000.0)
+                        .font(TextStyle::Monospace)
+                        .interactive(!is_connected)
+                        .ui(ui);
+                });
+                ui.end_row();
+
+                ui.label("path");
+                let path_response = TextEdit::multiline(&mut self.path_str)
+                    .desired_rows(1)
+                    .desired_width(3000.0)
+                    .font(TextStyle::Monospace)
+                    .interactive(!is_connected)
+                    .ui(ui);
+                if path_response.changed() {
+                    // Update path from typed text; is_toml will be resolved on save.
+                    self.path = if self.path_str.trim().is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(self.path_str.trim()))
+                    };
+                }
+                ui.end_row();
+            });
     }
 }
 
@@ -342,9 +379,7 @@ impl PageSession {
             let config_file_data = ConfigFileData::try_from(d)?;
             data.push(config_file_data);
         }
-
         self.clean_all_config_file_data();
-
         for d in data {
             self.add_config_file(d);
         }
@@ -375,8 +410,11 @@ impl PageSession {
                 self.session_info_timer = None;
             }
 
-            if let Some(config_file_data) = self.config_files.get_mut(&self.selected_config_file_id)
-            {
+            if let Some(config_file_data) = self.config_files.get_mut(&self.selected_config_file_id) {
+                if config_file_data.source.is_empty() && config_file_data.path.is_some() {
+                    let path = config_file_data.path.clone().unwrap();
+                    config_file_data.load_from_file(path);
+                }
                 config_file_data.show(ui, self.connected_config_file_id, &mut self.events);
             }
         });
@@ -401,9 +439,7 @@ impl PageSession {
         self.config_file_id_count += 1;
         let id = self.config_file_id_count;
         self.selected_config_file_id = id;
-
         config_file_data.id = id;
-
         self.config_files.insert(id, config_file_data);
         self.dnd_items.push(DndItem { id });
     }
@@ -412,17 +448,13 @@ impl PageSession {
         if self.config_files.len() < 2 {
             return;
         }
-
         let remove_id = self.selected_config_file_id;
-
         if let Some(id) = self.connected_config_file_id {
             if id == remove_id {
                 return;
             }
         }
-
         let _ = self.config_files.remove(&remove_id);
-
         let mut del_index = None;
         for (i, di) in self.dnd_items.iter().enumerate() {
             if di.id == remove_id {
@@ -466,13 +498,25 @@ impl PageSession {
         ui.horizontal(|ui| {
             if ui
                 .button(RichText::new(" + ").code())
-                .on_hover_text("Add a zenoh session configuration")
+                .on_hover_text("Open an existing config file")
                 .clicked()
             {
                 self.file_dialog = Some(NativeFileDialog::open(None));
             }
 
-            if ui.button(RichText::new(" - ").code()).clicked() {
+            if ui
+                .button(RichText::new("new").code())
+                .on_hover_text("Create a new config from a template")
+                .clicked()
+            {
+                self.add_config_file(ConfigFileData::new_template());
+            }
+
+            if ui
+                .button(RichText::new(" - ").code())
+                .on_hover_text("Remove selected config")
+                .clicked()
+            {
                 self.del_config_file();
             }
         });
@@ -487,7 +531,7 @@ impl PageSession {
                     self.dnd_items.as_mut_slice(),
                     |ui, item, handle, _state| {
                         if let Some(d) = self.config_files.get(&item.id) {
-                            let text = if let Some(id) = self.connected_config_file_id {
+                            let mut text = if let Some(id) = self.connected_config_file_id {
                                 if id == item.id {
                                     RichText::new(d.name.as_str()).underline().strong()
                                 } else {
@@ -496,7 +540,9 @@ impl PageSession {
                             } else {
                                 RichText::new(d.name.as_str())
                             };
-
+                            if d.is_dirty {
+                                text = text.color(Color32::YELLOW);
+                            }
                             handle.ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.selected_config_file_id,
