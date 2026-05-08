@@ -1,6 +1,6 @@
 use eframe::egui::{
     Align, Button, CentralPanel, CollapsingHeader, Color32, Context, Grid, Layout, RichText,
-    ScrollArea, SidePanel, TextEdit, TextStyle, Ui, Widget,
+    ScrollArea, SidePanel, TextEdit, TextStyle, TopBottomPanel, Ui, Widget,
 };
 use egui_dnd::dnd;
 use crate::file_dialog_helper::NativeFileDialog;
@@ -387,29 +387,38 @@ impl PageSession {
     }
 
     pub fn show(&mut self, ctx: &Context) {
+        // Refresh timer — needs &mut self so runs before any UI closures.
+        if self.connected_config_file_id.is_some() {
+            let should_refresh = self
+                .session_info_timer
+                .map(|t| t.elapsed() >= Duration::from_secs(2))
+                .unwrap_or(true);
+            if should_refresh {
+                self.events.push_back(Event::RequestSessionInfo);
+                self.session_info_timer = Some(Instant::now());
+            }
+        } else {
+            self.session_info = None;
+            self.session_info_timer = None;
+        }
+
         SidePanel::left("page_session_panel_left")
             .resizable(true)
             .show(ctx, |ui| {
                 self.show_config_file_list(ui);
             });
 
-        CentralPanel::default().show(ctx, |ui| {
-            if self.connected_config_file_id.is_some() {
-                let should_refresh = self
-                    .session_info_timer
-                    .map(|t| t.elapsed() >= Duration::from_secs(2))
-                    .unwrap_or(true);
-                if should_refresh {
-                    self.events.push_back(Event::RequestSessionInfo);
-                    self.session_info_timer = Some(Instant::now());
-                }
-                show_session_info_panel(ui, self.session_info.as_ref());
-                ui.separator();
-            } else {
-                self.session_info = None;
-                self.session_info_timer = None;
-            }
+        // Bottom panel for session info — allocated before CentralPanel so the
+        // config viewer's top position is never affected when it appears/disappears.
+        if self.connected_config_file_id.is_some() {
+            TopBottomPanel::bottom("page_session_info_panel")
+                .resizable(false)
+                .show(ctx, |ui| {
+                    show_session_info_panel(ui, self.session_info.as_ref());
+                });
+        }
 
+        CentralPanel::default().show(ctx, |ui| {
             if let Some(config_file_data) = self.config_files.get_mut(&self.selected_config_file_id) {
                 if config_file_data.source.is_empty() && config_file_data.path.is_some() {
                     let path = config_file_data.path.clone().unwrap();
