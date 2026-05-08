@@ -19,7 +19,11 @@ use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 
 use crate::{
     archive_file::ArchiveApp,
+    page_admin,
+    page_admin::PageAdmin,
     page_get::PageGet,
+    page_liveliness,
+    page_liveliness::PageLiveliness,
     page_put::PagePut,
     page_session,
     page_session::PageSession,
@@ -42,6 +46,8 @@ pub enum Page {
     Sub,
     Get,
     Put,
+    Liveliness,
+    Admin,
 }
 
 pub struct HammerApp {
@@ -57,6 +63,8 @@ pub struct HammerApp {
     p_sub: PageSub,
     p_get: PageGet,
     p_put: PagePut,
+    p_liveliness: PageLiveliness,
+    p_admin: PageAdmin,
 }
 
 impl Default for HammerApp {
@@ -74,6 +82,8 @@ impl Default for HammerApp {
             p_sub: PageSub::default(),
             p_get: PageGet::default(),
             p_put: PagePut::default(),
+            p_liveliness: PageLiveliness::default(),
+            p_admin: PageAdmin::default(),
         }
     }
 }
@@ -85,6 +95,8 @@ impl eframe::App for HammerApp {
         self.processing_page_sub_events();
         self.processing_page_put_events();
         self.processing_page_get_events();
+        self.processing_page_liveliness_events();
+        self.processing_page_admin_events();
         self.show_ui(ctx, frame);
         ctx.request_repaint_after(Duration::from_millis(100));
     }
@@ -118,6 +130,12 @@ impl HammerApp {
             }
             Page::Put => {
                 self.p_put.show(ctx);
+            }
+            Page::Liveliness => {
+                self.p_liveliness.show(ctx);
+            }
+            Page::Admin => {
+                self.p_admin.show(ctx);
             }
         }
 
@@ -353,6 +371,28 @@ impl HammerApp {
                 MsgZenohToGui::SessionInfo(data) => {
                     self.p_session.session_info = Some(*data);
                 }
+                MsgZenohToGui::DeclareLivelinessTokenRes(res) => {
+                    let (id, r) = *res;
+                    self.p_liveliness.processing_declare_token_res(id, r);
+                }
+                MsgZenohToGui::AddLivelinessSubRes(res) => {
+                    let (id, r) = *res;
+                    self.p_liveliness.processing_add_sub_res(id, r);
+                }
+                MsgZenohToGui::DelLivelinessSubRes(id) => {
+                    self.p_liveliness.processing_del_sub_res(id);
+                }
+                MsgZenohToGui::LivelinessSubCB(d) => {
+                    let (id, sample, t) = *d;
+                    self.p_liveliness.processing_sub_cb(id, sample, t);
+                }
+                MsgZenohToGui::AdminQueryRes(d) => {
+                    let (id, key, encoding, payload, is_ok) = *d;
+                    self.p_admin.processing_query_res(id, key, encoding, payload, is_ok);
+                }
+                MsgZenohToGui::AdminQueryDone(id) => {
+                    self.p_admin.processing_query_done(id);
+                }
             }
         }
     }
@@ -433,6 +473,57 @@ impl HammerApp {
                 crate::page_get::Event::Get(p) => {
                     if let Some(sender) = &self.sender_to_zenoh {
                         let _ = sender.send(MsgGuiToZenoh::GetReq(p));
+                    }
+                }
+            }
+        }
+    }
+
+    fn processing_page_liveliness_events(&mut self) {
+        while let Some(event) = self.p_liveliness.events.pop_front() {
+            match event {
+                page_liveliness::Event::DeclareToken(data) => {
+                    if let Some(sender) = &self.sender_to_zenoh {
+                        let _ = sender.send(MsgGuiToZenoh::DeclareLivelinessToken(data));
+                    } else {
+                        let id = data.id;
+                        self.p_liveliness.processing_declare_token_res(
+                            id,
+                            Err("not connected".to_string()),
+                        );
+                    }
+                }
+                page_liveliness::Event::UndeclareToken(id) => {
+                    if let Some(sender) = &self.sender_to_zenoh {
+                        let _ = sender.send(MsgGuiToZenoh::UndeclareLivelinessToken(id));
+                    }
+                }
+                page_liveliness::Event::AddSub(data) => {
+                    if let Some(sender) = &self.sender_to_zenoh {
+                        let _ = sender.send(MsgGuiToZenoh::AddLivelinessSubReq(data));
+                    } else {
+                        let id = data.id;
+                        self.p_liveliness
+                            .processing_add_sub_res(id, Err("not connected".to_string()));
+                    }
+                }
+                page_liveliness::Event::DelSub(id) => {
+                    if let Some(sender) = &self.sender_to_zenoh {
+                        let _ = sender.send(MsgGuiToZenoh::DelLivelinessSubReq(id));
+                    }
+                }
+            }
+        }
+    }
+
+    fn processing_page_admin_events(&mut self) {
+        while let Some(event) = self.p_admin.events.pop_front() {
+            match event {
+                page_admin::Event::Query(data) => {
+                    if let Some(sender) = &self.sender_to_zenoh {
+                        let _ = sender.send(MsgGuiToZenoh::AdminQueryReq(data));
+                    } else {
+                        self.p_admin.set_not_connected();
                     }
                 }
             }

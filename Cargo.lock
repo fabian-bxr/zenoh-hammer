@@ -6681,6 +6681,7 @@ dependencies = [
  "egui_json_tree",
  "egui_plot",
  "env_logger",
+ "flate2",
  "flume",
  "hex",
  "image",
