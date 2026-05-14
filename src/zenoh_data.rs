@@ -85,6 +85,32 @@ impl KnownEncoding {
     }
 }
 
+/// Schema info parsed out of an `application/msgpack;<StructName>@<hex-hash>`
+/// encoding string, as defined by zenohstruct's wire format.
+#[derive(Debug, Clone)]
+pub struct MsgpackSchemaInfo {
+    pub struct_name: Option<String>,
+    pub hex_hash: Option<String>,
+}
+
+/// Detect msgpack payloads by inspecting the encoding's stringified form.
+/// `application/msgpack` is not a built-in Zenoh encoding id, so we identify
+/// it by prefix-matching the Display form.
+pub fn detect_msgpack(encoding: &Encoding) -> Option<MsgpackSchemaInfo> {
+    let s = encoding.to_string();
+    let rest = s.strip_prefix("application/msgpack")?;
+    if rest.is_empty() {
+        return Some(MsgpackSchemaInfo { struct_name: None, hex_hash: None });
+    }
+    // Expect ";<StructName>@<hex>" (the schema suffix).
+    let suffix = rest.strip_prefix(';').unwrap_or(rest);
+    let (name, hash) = match suffix.rsplit_once('@') {
+        Some((n, h)) => (Some(n.to_string()), Some(h.to_string())),
+        None => (Some(suffix.to_string()), None),
+    };
+    Some(MsgpackSchemaInfo { struct_name: name, hex_hash: hash })
+}
+
 pub fn zenoh_value_abstract(encoding: &Encoding, data: &ZBytes) -> Result<String, String> {
     let parse_error = Err("parse error".to_string());
     let dot_ok = Ok("...".to_string());

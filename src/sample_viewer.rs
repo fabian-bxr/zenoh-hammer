@@ -9,7 +9,7 @@ use zenoh::{
 use crate::{
     data_viewer::DataViewer,
     hex_viewer::HexViewer,
-    zenoh_data::{bytes_type, BytesType, ZCongestionControl, ZPriority, ZReliability},
+    zenoh_data::{bytes_type, detect_msgpack, BytesType, ZCongestionControl, ZPriority, ZReliability},
 };
 
 #[derive(Eq, PartialEq, Copy, Clone)]
@@ -221,11 +221,44 @@ impl SampleInfo {
             ui.end_row();
 
             ui.label("attachment:");
-            let s = String::from_utf8(self.attachment.clone())
-                .unwrap_or(format!("{:?}", self.attachment.as_slice()));
-            let text = RichText::new(s).monospace();
+            let msgpack_info = detect_msgpack(&self.encoding);
+            let s = if msgpack_info.is_some() && self.attachment.len() >= 4 {
+                // zenohstruct: first 4 bytes are a BLAKE2b schema hash.
+                // Topic attachments are exactly 4 bytes; BulkTopic appends a
+                // msgpack-encoded header struct after the hash (not decoded yet).
+                let hash_hex = hex::encode(&self.attachment[..4]);
+                if self.attachment.len() == 4 {
+                    format!("hash: {hash_hex}")
+                } else {
+                    format!(
+                        "hash: {hash_hex}  + {} bytes header",
+                        self.attachment.len() - 4
+                    )
+                }
+            } else {
+                String::from_utf8(self.attachment.clone())
+                    .unwrap_or(format!("{:?}", self.attachment.as_slice()))
+            };
+            let mut text = RichText::new(s).monospace();
+            if let Some(info) = &msgpack_info {
+                if let (Some(expected), true) = (&info.hex_hash, self.attachment.len() >= 4) {
+                    let actual = hex::encode(&self.attachment[..4]);
+                    if !expected.eq_ignore_ascii_case(&actual) {
+                        text = text.color(eframe::egui::Color32::YELLOW);
+                    }
+                }
+            }
             ui.label(text);
             ui.end_row();
+
+            if let Some(info) = &msgpack_info {
+                ui.label("msgpack schema:");
+                let name = info.struct_name.clone().unwrap_or_else(|| "-".to_string());
+                let hash = info.hex_hash.clone().unwrap_or_else(|| "-".to_string());
+                let text = RichText::new(format!("{name} @ {hash}")).monospace();
+                ui.label(text);
+                ui.end_row();
+            }
 
             ui.label("source_info. id:");
             let s = match &self.source_info {

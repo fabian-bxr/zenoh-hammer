@@ -20,6 +20,7 @@ image = { version = "0.25", default-features = false, features = [ "png", "jpeg"
 json5 = { version = "0.4" }
 log = { version = "0.4" }
 num_enum = { version = "0.7" }
+rmpv = { version = "1", features = [ "with-serde" ] }
 serde = { version = "1.0" }
 serde_json = { version = "1.0" }
 size_fmt = { version = "0.1" }

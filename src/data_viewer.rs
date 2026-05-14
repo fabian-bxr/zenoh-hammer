@@ -7,7 +7,61 @@ use image::{ImageFormat, ImageReader};
 use std::io::Cursor;
 use zenoh::bytes::Encoding;
 
-use crate::zenoh_data::KnownEncoding;
+use crate::zenoh_data::{detect_msgpack, KnownEncoding};
+
+/// Convert a dynamic msgpack value into a `serde_json::Value` so it can flow
+/// through the existing JSON viewer. Lossy on purpose: binary blobs become
+/// hex strings, non-string map keys are stringified, msgpack extensions are
+/// surfaced as `{ "_ext": { "type": <i8>, "data": "<hex>" } }`.
+fn rmpv_to_json(value: rmpv::Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    match value {
+        rmpv::Value::Nil => J::Null,
+        rmpv::Value::Boolean(b) => J::Bool(b),
+        rmpv::Value::Integer(i) => {
+            if let Some(u) = i.as_u64() {
+                J::Number(u.into())
+            } else if let Some(s) = i.as_i64() {
+                J::Number(s.into())
+            } else if let Some(f) = i.as_f64() {
+                serde_json::Number::from_f64(f).map(J::Number).unwrap_or(J::Null)
+            } else {
+                J::Null
+            }
+        }
+        rmpv::Value::F32(f) => serde_json::Number::from_f64(f as f64)
+            .map(J::Number)
+            .unwrap_or(J::Null),
+        rmpv::Value::F64(f) => serde_json::Number::from_f64(f)
+            .map(J::Number)
+            .unwrap_or(J::Null),
+        rmpv::Value::String(s) => match s.into_str() {
+            Some(s) => J::String(s),
+            None => J::Null,
+        },
+        rmpv::Value::Binary(b) => J::String(hex::encode(b)),
+        rmpv::Value::Array(arr) => J::Array(arr.into_iter().map(rmpv_to_json).collect()),
+        rmpv::Value::Map(pairs) => {
+            let mut obj = serde_json::Map::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                let key = match k {
+                    rmpv::Value::String(s) => s.into_str().unwrap_or_else(|| "<invalid>".into()),
+                    other => other.to_string(),
+                };
+                obj.insert(key, rmpv_to_json(v));
+            }
+            J::Object(obj)
+        }
+        rmpv::Value::Ext(t, data) => {
+            let mut obj = serde_json::Map::new();
+            let mut inner = serde_json::Map::new();
+            inner.insert("type".into(), J::Number((t as i64).into()));
+            inner.insert("data".into(), J::String(hex::encode(data)));
+            obj.insert("_ext".into(), J::Object(inner));
+            J::Object(obj)
+        }
+    }
+}
 
 /// Decode image bytes into a ColorImage. This is CPU-intensive and should be
 /// called from a background thread when used in a streaming context.
@@ -195,6 +249,9 @@ impl DataViewer {
     }
 
     pub fn load(encoding: &Encoding, data: &[u8]) -> DataViewer {
+        if detect_msgpack(encoding).is_some() {
+            return Self::load_msgpack(data).unwrap_or_else(|e| e);
+        }
         let known_encoding = KnownEncoding::from_encoding(encoding);
         match known_encoding {
             KnownEncoding::ZBytes => DataViewer::Bin,
@@ -272,6 +329,21 @@ impl DataViewer {
             selected_page: ViewerJsonPage::Source,
             source,
             format: serde_json::to_string_pretty(&v).unwrap(),
+            serde_json_value: v,
+        })
+    }
+
+    fn load_msgpack(data: &[u8]) -> Result<Self, Self> {
+        let mut cursor = Cursor::new(data);
+        let value = rmpv::decode::read_value(&mut cursor)
+            .map_err(|e| DataViewer::Error(format!("msgpack decode error: {e}")))?;
+        let v = rmpv_to_json(value);
+        let source = serde_json::to_string(&v).unwrap_or_default();
+        let format = serde_json::to_string_pretty(&v).unwrap_or_default();
+        Ok(DataViewer::Json {
+            selected_page: ViewerJsonPage::Format,
+            source,
+            format,
             serde_json_value: v,
         })
     }
